@@ -2,12 +2,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 # Configure the page
 st.set_page_config(
     page_title="316 Super League",
-    page_icon="⚽",
+    page_icon="🏈",
     layout="wide"
 )
 
@@ -214,8 +215,13 @@ def display_league_standings(league_name, league_id, league_index=0, total_leagu
 
 # Main app
 def main():
-    st.title("⚽ 316 Super League")
-    st.markdown(f"*Last updated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}*")
+    st.title("🏈 316 Super League")
+    # Display last-updated time in US Eastern Time
+    try:
+        now_et = datetime.now(tz=ZoneInfo("America/New_York"))
+    except Exception:
+        now_et = datetime.now()
+    st.markdown(f"*Last updated: {now_et.strftime('%B %d, %Y at %I:%M %p %Z')}*")
     
     # Instructions for setup
     if any(league_id.startswith("YOUR_") for league_id in LEAGUES.values()):
