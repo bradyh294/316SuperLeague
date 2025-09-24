@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 from datetime import datetime
 import pandas as pd
@@ -196,7 +197,17 @@ def display_league_standings(league_name, league_id, league_index=0, total_leagu
     </div>
     """
 
-    st.markdown(html, unsafe_allow_html=True)
+    # Compute a reasonable height for the embedded HTML table and render via components.html
+    try:
+        row_height = 36
+        padding = 60
+        table_height = int(n * row_height + padding)
+        max_height = 1200
+        table_height = min(table_height, max_height)
+    except Exception:
+        table_height = 400
+
+    components.html(html, height=table_height, scrolling=True)
     
     # (Removed: per-request, metrics for Current Week / Regular Season Weeks / Total Teams)
 
