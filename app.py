@@ -167,22 +167,23 @@ def display_league_standings(league_name, league_id, league_index=0, total_leagu
         rows_html += f"<tr class=\"{cls}\">{row_cells}</tr>\n"
 
     # CSS uses prefers-color-scheme to pick subtle backgrounds that read well in both themes.
-    css = '''
-    <style>
-    .sl-table { border-collapse: collapse; width: 100%; }
-    .sl-table th, .sl-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid rgba(0,0,0,0.06); }
-    .sl-table thead th { font-weight: 600; }
-    /* Light mode faded colors */
-    .promo { background-color: #e6f4ea; }
-    .demo  { background-color: #fdecea; }
-    /* Dark mode adjustments */
-    @media (prefers-color-scheme: dark) {
-      .sl-table th, .sl-table td { border-bottom: 1px solid rgba(255,255,255,0.06); }
-      .promo { background-color: rgba(38,166,91,0.12); }
-      .demo  { background-color: rgba(239,83,80,0.12); }
-    }
-    </style>
-    '''
+        css = '''
+        <style>
+        .sl-table { border-collapse: collapse; width: 100%; background: transparent; }
+        .sl-table th, .sl-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid rgba(0,0,0,0.06); color: inherit; }
+        .sl-table thead th { font-weight: 600; }
+        /* Light mode faded colors */
+        .promo { background-color: #e6f4ea; }
+        .demo  { background-color: #fdecea; }
+        /* Dark mode adjustments: set light text color and subtle translucent backgrounds */
+        @media (prefers-color-scheme: dark) {
+            .sl-table { background: transparent; }
+            .sl-table th, .sl-table td { border-bottom: 1px solid rgba(255,255,255,0.06); color: #e6eef6; }
+            .promo { background-color: rgba(38,166,91,0.12); }
+            .demo  { background-color: rgba(239,83,80,0.12); }
+        }
+        </style>
+        '''
 
     header_html = "".join(f"<th>{h}</th>" for h in headers)
     html = f"""
