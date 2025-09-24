@@ -1,0 +1,41 @@
+name: Update Fantasy Data
+
+on:
+  schedule:
+    # Run twice daily at 6 AM and 6 PM UTC (adjust timezone as needed)
+    - cron: '0 6,18 * * *'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        pip install requests
+        
+    - name: Update league data
+      run: |
+        # This is a placeholder - you can add a data update script here later
+        echo "Data update scheduled for $(date)"
+        
+    - name: Commit changes (if any data files created)
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add -A
+        git diff-index --quiet HEAD || git commit -m "Update fantasy data $(date)"
+        
+    - name: Push changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
