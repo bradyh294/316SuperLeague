@@ -140,23 +140,63 @@ def display_league_standings(league_name, league_id, league_index=0, total_leagu
             return [demo_color] * len(row)
         return [''] * len(row)
 
-    try:
-        styled = df.style.apply(_row_style, axis=1)
-    except Exception:
-        styled = df
+    # Render a custom HTML table so we can control colors for light/dark mode.
+    # Build classes for each row (promo/demo/none) then render HTML with a small CSS block
+    n = len(df)
+    promotion_allowed = league_index != 0
+    demotion_allowed = league_index != (total_leagues - 1)
 
-    # Render the dataframe with a dynamic height so all teams are visible without an internal scrollbar.
-    # Estimate row height and add padding. This avoids internal scrolling for typical league sizes (e.g. 10-12 teams).
-    try:
-        row_height = 36
-        padding = 60
-        table_height = int(len(df) * row_height + padding)
-        max_height = 1200
-        table_height = min(table_height, max_height)
-    except Exception:
-        table_height = 400
+    # Build table header
+    headers = list(df.columns)
 
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=table_height)
+    rows_html = ""
+    for _, row in df.iterrows():
+        try:
+            rank = int(row['Rank'])
+        except Exception:
+            rank = None
+
+        cls = ""
+        if promotion_allowed and rank is not None and rank <= 3:
+            cls = "promo"
+        elif demotion_allowed and rank is not None and rank > n - 3:
+            cls = "demo"
+
+        row_cells = "".join(f"<td>{row[h]}</td>" for h in headers)
+        rows_html += f"<tr class=\"{cls}\">{row_cells}</tr>\n"
+
+    # CSS uses prefers-color-scheme to pick subtle backgrounds that read well in both themes.
+    css = '''
+    <style>
+    .sl-table { border-collapse: collapse; width: 100%; }
+    .sl-table th, .sl-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid rgba(0,0,0,0.06); }
+    .sl-table thead th { font-weight: 600; }
+    /* Light mode faded colors */
+    .promo { background-color: #e6f4ea; }
+    .demo  { background-color: #fdecea; }
+    /* Dark mode adjustments */
+    @media (prefers-color-scheme: dark) {
+      .sl-table th, .sl-table td { border-bottom: 1px solid rgba(255,255,255,0.06); }
+      .promo { background-color: rgba(38,166,91,0.12); }
+      .demo  { background-color: rgba(239,83,80,0.12); }
+    }
+    </style>
+    '''
+
+    header_html = "".join(f"<th>{h}</th>" for h in headers)
+    html = f"""
+    {css}
+    <div class="sl-table-wrapper">
+      <table class="sl-table">
+        <thead><tr>{header_html}</tr></thead>
+        <tbody>
+        {rows_html}
+        </tbody>
+      </table>
+    </div>
+    """
+
+    st.markdown(html, unsafe_allow_html=True)
     
     # (Removed: per-request, metrics for Current Week / Regular Season Weeks / Total Teams)
 
