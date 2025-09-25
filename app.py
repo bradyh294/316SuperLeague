@@ -573,39 +573,85 @@ def main():
         # Render each highlighted box with larger subheading and league on its own line
         with col1:
             display_top = top_team or (f"Team {int(top.get('roster_id'))}" if top is not None and top.get('roster_id') is not None else "Team ?")
+            inline_css = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);}
+            .sl-hl-muted{color:var(--sl-muted,#6c757d);}
+            .sl-hl-success{color:var(--sl-success,#1e7e34);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-success{color:var(--sl-success,rgba(38,166,91,0.95)) !important}
+            }
+            </style>
+            """
             html_top = f"""
+            {inline_css}
             <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Highest scoring team</div>
-            <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(display_top))}</div>
-            <div style='font-size:13px;color:var(--sl-muted, #6c757d)'>{_html.escape(str(top_league))}</div>
-            <div style='font-size:20px;margin-top:6px;color:var(--sl-success, #1e7e34);font-weight:600'>{float(top_points):.2f} pts</div>
+            <div class='sl-hl-primary' style='font-size:20px;font-weight:600'>{_html.escape(str(display_top))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(top_league))}</div>
+            <div class='sl-hl-success' style='font-size:20px;margin-top:6px'>{float(top_points):.2f} pts</div>
             """
             st.markdown(html_top, unsafe_allow_html=True)
 
         with col2:
             display_bottom = bottom_team or (f"Team {int(bottom.get('roster_id'))}" if bottom is not None and bottom.get('roster_id') is not None else "Team ?")
+            inline_css_bottom = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);}
+            .sl-hl-muted{color:var(--sl-muted,#6c757d);}
+            .sl-hl-danger{color:var(--sl-danger,#e53935);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-danger{color:var(--sl-danger,rgba(239,83,80,0.95)) !important}
+            }
+            </style>
+            """
             html_bottom = f"""
+            {inline_css_bottom}
             <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Lowest scoring team</div>
-            <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(display_bottom))}</div>
-            <div style='font-size:13px;color:var(--sl-muted, #6c757d)'>{_html.escape(str(bottom_league))}</div>
-            <div style='font-size:20px;margin-top:6px;color:var(--sl-danger, #e53935);font-weight:600'>{float(bottom_points):.2f} pts</div>
+            <div class='sl-hl-primary' style='font-size:20px;font-weight:600'>{_html.escape(str(display_bottom))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(bottom_league))}</div>
+            <div class='sl-hl-danger' style='font-size:20px;margin-top:6px'>{float(bottom_points):.2f} pts</div>
             """
             st.markdown(html_bottom, unsafe_allow_html=True)
 
         with col3:
             if closest_display is not None:
                 t1, t2, diff = closest_display
+                inline_css_closest = """
+                <style>
+                .sl-hl-primary{color:var(--sl-primary,#000000);font-weight:600}
+                .sl-hl-muted{color:var(--sl-muted,#6c757d)}
+                @media (prefers-color-scheme: dark){
+                  .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+                  .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+                }
+                </style>
+                """
                 html_closest = f"""
+                {inline_css_closest}
                 <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Closest matchup</div>
-                <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(t1))}</div>
-                <div style='font-size:13px;color:var(--sl-muted, #6c757d)'>vs</div>
-                <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(t2))}</div>
-                <div style='font-size:20px;margin-top:6px;color:var(--sl-primary, #000000);font-weight:600'>Δ {float(diff):.2f} pts</div>
+                <div class='sl-hl-primary' style='font-size:20px'>{_html.escape(str(t1))}</div>
+                <div class='sl-hl-muted' style='font-size:13px'>vs</div>
+                <div class='sl-hl-primary' style='font-size:20px'>{_html.escape(str(t2))}</div>
+                <div class='sl-hl-primary' style='font-size:20px;margin-top:6px'>Δ {float(diff):.2f} pts</div>
                 """
                 st.markdown(html_closest, unsafe_allow_html=True)
             else:
+                inline_css_closest = """
+                <style>
+                .sl-hl-muted{color:var(--sl-muted,#6c757d)}
+                @media (prefers-color-scheme: dark){
+                  .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+                }
+                </style>
+                """
                 html_closest = f"""
+                {inline_css_closest}
                 <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Closest matchup</div>
-                <div style='font-size:14px;color:var(--sl-muted, #6c757d)'>No close matchups found</div>
+                <div class='sl-hl-muted' style='font-size:14px'>No close matchups found</div>
                 """
                 st.markdown(html_closest, unsafe_allow_html=True)
 
