@@ -5,6 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import pandas as pd
 import html as _html
+import textwrap
 
 # Configure the page
 st.set_page_config(
@@ -411,14 +412,24 @@ def main():
         4. Save the file and refresh this page
         """)
         st.divider()
-    
 
-    # Collect rosters/users (cached) for all leagues once (needed by weekly highlights)
+    # Collect rosters/users (cached) for all leagues once (needed by weekly and season highlights)
     league_rosters = {}
     league_users = {}
     for league_name, league_id in LEAGUES.items():
         league_rosters[league_name] = fetch_rosters(league_id) or []
         league_users[league_name] = fetch_users(league_id) or []
+
+    # Helper to consistently render HTML blocks (dedent then allow unsafe HTML)
+    def render_html_block(html_block: str):
+        try:
+            tidy = textwrap.dedent(html_block).lstrip()
+        except Exception:
+            tidy = html_block
+        st.markdown(tidy, unsafe_allow_html=True)
+
+    # Season highlights (single-week extremes across the season)
+    # ...season highlights moved below weekly highlights...
 
     # Weekly highlights (across all leagues) - moved to top so users see highlights first
     st.markdown("---")
@@ -656,7 +667,217 @@ def main():
                 st.markdown(html_closest, unsafe_allow_html=True)
 
         st.divider()
+    st.header("Season highlights")
 
+    # Collect season entries across all leagues (probe weeks via fetch_matchups)
+    season_entries = []
+    for league_name, league_id in LEAGUES.items():
+        raw = fetch_matchups(league_id) or []
+        entries = _extract_entries_from_matchups(raw)
+        for e in entries:
+            # skip entries without numeric points
+            pts = e.get('points')
+            if pts is None:
+                continue
+            e_copy = dict(e)
+            e_copy['league'] = league_name
+            roster_id = e_copy.get('roster_id')
+            if roster_id is not None:
+                e_copy['team'] = resolve_team_name_from_roster_id(roster_id, league_name, league_rosters, league_users)
+            season_entries.append(e_copy)
+
+    if not season_entries:
+        st.info("No season matchup data available to compute season highlights.")
+    else:
+        # Restrict to completed weeks only.
+        try:
+            nfl_state = fetch_nfl_state()
+        except Exception:
+            nfl_state = None
+
+        max_completed_week = None
+        if nfl_state and isinstance(nfl_state.get('week'), int):
+            # state.week is the current in-progress week; completed weeks are <= week-1
+            max_completed_week = max(nfl_state.get('week') - 1, 0)
+
+        # If we couldn't get state, infer completed weeks from data (entries with numeric points)
+        if max_completed_week is None:
+            weeks_with_points = [e.get('week') for e in season_entries if e.get('week') is not None]
+            if weeks_with_points:
+                max_completed_week = max(weeks_with_points)
+
+        if max_completed_week is not None:
+            # keep only entries where week is known and <= max_completed_week
+            season_entries = [e for e in season_entries if (e.get('week') is not None and int(e.get('week')) <= int(max_completed_week))]
+
+        if not season_entries:
+            st.info("No completed-week season data available to compute season highlights.")
+            # skip the rest
+            season_entries = []
+        
+    if not season_entries:
+        # nothing to do further
+        pass
+    else:
+        import math
+        df_season = pd.DataFrame(season_entries)
+
+        # Season-high and season-low (single-week)
+        try:
+            season_top = df_season.loc[df_season['points'].idxmax()]
+        except Exception:
+            season_top = None
+        try:
+            season_bottom = df_season.loc[df_season['points'].idxmin()]
+        except Exception:
+            season_bottom = None
+
+        # Season-closest single-week matchup: group by (league, week, matchup_id)
+        closest_season = None
+        groups = {}
+        for _, row in df_season.iterrows():
+            wk = row.get('week')
+            mid = row.get('matchup_id')
+            league = row.get('league')
+            if wk is None or mid is None:
+                continue
+            key = f"{league}:{wk}:{mid}"
+            groups.setdefault(key, []).append(row)
+
+        for grp in groups.values():
+            if len(grp) < 2:
+                continue
+            # extract points and compute minimal pairwise diff
+            pts = sorted([float(r.get('points', 0.0)) for r in grp])
+            if len(pts) < 2:
+                continue
+            min_diff = min(abs(a - b) for a, b in zip(pts, pts[1:]))
+            if closest_season is None or min_diff < closest_season['diff']:
+                closest_season = {'diff': min_diff, 'group': grp}
+
+        # Render season highlights using the same three-column layout and inline CSS used above
+        col1, col2, col3 = st.columns(3)
+
+        # Prepare display values defensively
+        if season_top is not None:
+            st_top_team = season_top.get('team') if hasattr(season_top, 'get') else season_top.get('team', None)
+            st_top_league = season_top.get('league', '') if hasattr(season_top, 'get') else season_top.get('league', '')
+            st_top_points = float(season_top.get('points', 0.0)) if hasattr(season_top, 'get') else float(season_top.get('points', 0.0))
+            st_top_week = season_top.get('week') if hasattr(season_top, 'get') else season_top.get('week')
+        else:
+            st_top_team = None
+            st_top_league = ''
+            st_top_points = 0.0
+            st_top_week = None
+
+        if season_bottom is not None:
+            st_bottom_team = season_bottom.get('team') if hasattr(season_bottom, 'get') else season_bottom.get('team', None)
+            st_bottom_league = season_bottom.get('league', '') if hasattr(season_bottom, 'get') else season_bottom.get('league', '')
+            st_bottom_points = float(season_bottom.get('points', 0.0)) if hasattr(season_bottom, 'get') else float(season_bottom.get('points', 0.0))
+            st_bottom_week = season_bottom.get('week') if hasattr(season_bottom, 'get') else season_bottom.get('week')
+        else:
+            st_bottom_team = None
+            st_bottom_league = ''
+            st_bottom_points = 0.0
+            st_bottom_week = None
+
+        # Closest season matchup display
+        season_closest_display = None
+        if closest_season is not None:
+            grp = closest_season['group']
+            teams = []
+            for r in grp:
+                # r may be a Series or dict-like
+                try:
+                    name = r.get('team') if hasattr(r, 'get') else r['team']
+                    pts = float(r.get('points') if hasattr(r, 'get') else r['points'])
+                except Exception:
+                    name = None
+                    pts = 0.0
+                teams.append({'team': name or f"Team {r.get('roster_id', '?')}", 'points': pts, 'league': r.get('league'), 'week': r.get('week')})
+            if len(teams) >= 2:
+                season_closest_display = (teams[0], teams[1], closest_season['diff'])
+
+        # Render
+        with col1:
+            display_top = st_top_team or (f"Team {int(season_top.get('roster_id'))}" if season_top is not None and season_top.get('roster_id') is not None else "Team ?")
+            inline_css = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);} 
+            .sl-hl-muted{color:var(--sl-muted,#6c757d);} 
+            .sl-hl-success{color:var(--sl-success,#1e7e34);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-success{color:var(--sl-success,rgba(38,166,91,0.95)) !important}
+            }
+            </style>
+            """
+            wk_label = f" (Week {st_top_week})" if st_top_week is not None else ""
+            html_top = f"""
+            {inline_css}
+            <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season highest single-week team</div>
+            <div class='sl-hl-primary' style='font-size:20px;font-weight:600'>{_html.escape(str(display_top))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(st_top_league))}{wk_label}</div>
+            <div class='sl-hl-success' style='font-size:20px;margin-top:6px'>{st_top_points:.2f} pts</div>
+            """
+            render_html_block(html_top)
+
+        with col2:
+            display_bottom = st_bottom_team or (f"Team {int(season_bottom.get('roster_id'))}" if season_bottom is not None and season_bottom.get('roster_id') is not None else "Team ?")
+            inline_css_bottom = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);} 
+            .sl-hl-muted{color:var(--sl-muted,#6c757d);} 
+            .sl-hl-danger{color:var(--sl-danger,#e53935);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-danger{color:var(--sl-danger,rgba(239,83,80,0.95)) !important}
+            }
+            </style>
+            """
+            wk_label_b = f" (Week {st_bottom_week})" if st_bottom_week is not None else ""
+            html_bottom = f"""
+            {inline_css_bottom}
+            <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season lowest single-week team</div>
+            <div class='sl-hl-primary' style='font-size:20px;font-weight:600'>{_html.escape(str(display_bottom))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(st_bottom_league))}{wk_label_b}</div>
+            <div class='sl-hl-danger' style='font-size:20px;margin-top:6px'>{st_bottom_points:.2f} pts</div>
+            """
+            render_html_block(html_bottom)
+
+        with col3:
+            if season_closest_display is not None:
+                left, right, diff = season_closest_display
+                inline_css_closest = """
+                <style>
+                .sl-hl-primary{color:var(--sl-primary,#000000);font-weight:600}
+                .sl-hl-muted{color:var(--sl-muted,#6c757d)}
+                @media (prefers-color-scheme: dark){
+                  .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+                  .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+                }
+                </style>
+                """
+                wk_label_l = f" (Week {left.get('week')})" if left.get('week') is not None else ""
+                html_closest = f"""
+                {inline_css_closest}
+                <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season closest single-week matchup</div>
+                <div class='sl-hl-primary' style='font-size:20px'>{_html.escape(str(left.get('team')))}</div>
+                <div class='sl-hl-muted' style='font-size:13px'>vs {left.get('league')}{wk_label_l}</div>
+                <div class='sl-hl-primary' style='font-size:20px'>{_html.escape(str(right.get('team')))}</div>
+                <div class='sl-hl-primary' style='font-size:20px;margin-top:6px'>Δ {float(diff):.2f} pts</div>
+                """
+                render_html_block(html_closest)
+            else:
+                html_closest = f"""
+                <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season closest single-week matchup</div>
+                <div style='font-size:14px;color:var(--sl-muted,#6c757d)'>No season close matchups found</div>
+                """
+                render_html_block(html_closest)
+
+    st.divider()
     # Display all leagues (first entry in LEAGUES is the top league)
     for idx, (league_name, league_id) in enumerate(LEAGUES.items()):
         display_league_standings(league_name, league_id, league_index=idx, total_leagues=len(LEAGUES))
