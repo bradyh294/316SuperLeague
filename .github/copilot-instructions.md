@@ -7,49 +7,50 @@ Key principles (why the repo is structured this way):
 - Single entrypoint: `app.py` keeps UI, data fetching, and rendering together for simplicity—prefer minimal, local edits over sweeping refactors.
 - Cache-first: `@st.cache_data(ttl=43200)` (12h) is used for API calls to limit rate and latency; respect the TTL unless you explicitly change cache behavior.
 
-What to look at first
-- `app.py` — the entire app lives here. Important symbols:
-  - `LEAGUES` dict (human name -> league ID). Placeholder IDs start with `YOUR_` and are checked at runtime.
-  - `fetch_league_info`, `fetch_rosters`, `fetch_users` (all annotated with `@st.cache_data(ttl=43200)`).
-  - `get_team_name(roster, users)` — fallback order: `user.metadata.team_name`, `display_name`, then `username`.
-  - `display_league_standings(league_name, league_id)` — constructs a pandas DataFrame from roster `settings` and renders with Streamlit (`st.dataframe`, `st.metric`).
+## Quick orientation for AI agents
 
-Data flow and integrations
-- Source: Sleeper API endpoints under `https://api.sleeper.app/v1/league/{league_id}` and subpaths (`/rosters`, `/users`). Implement new fetchers following existing `requests.get` + `@st.cache_data` pattern.
-- No secrets: league IDs are treated as non-secret and stored directly in `app.py`. The app does not read env vars or secret stores.
+This repo is a single-file Streamlit dashboard: `app.py`. The app fetches public Sleeper fantasy league data, caches it, and renders standings and weekly/season highlights. Keep edits focused, small, and UI-first — prefer adding helpers in `app.py` rather than wide refactors.
 
-Developer workflows (commands you’ll actually run)
-- Install deps and run locally (Windows PowerShell):
-  ```powershell
+Key points to read first
+- `LEAGUES` (top of `app.py`): mapping of human league name -> Sleeper league ID. The app warns if any ID looks like a placeholder (commonly prefixed with `YOUR_`).
+- Cached fetchers: `fetch_league_info`, `fetch_rosters`, `fetch_users`, `fetch_matchups`, `fetch_nfl_state`. They use `requests.get` and are decorated with `@st.cache_data` (TTLs: 43200s for most league fetchers, 3600s for nfl state).
+- Data normalization helpers: `_extract_entries_from_matchups`, `resolve_team_name_from_roster_id`, `get_team_name` — these implement defensive parsing of Sleeper payload shapes and name fallbacks (metadata.team_name -> display_name -> username -> Team {id}).
+- UI renderers: `display_league_standings` builds a pandas DataFrame from `roster['settings']` and uses `components.html` for a custom table (falls back to `st.dataframe` on error). Weekly/season highlights use `st.columns` + inline HTML/CSS.
+
+Data flow & integrations (concrete)
+- Source: Sleeper REST API base `https://api.sleeper.app/v1/league/{league_id}` and subpaths `/rosters`, `/users`, `/matchups/{week}` and global `https://api.sleeper.app/v1/state/nfl`.
+- `fetch_matchups(league_id, week=None)` probes week endpoints (1..18) when no week is supplied and normalizes results. Add similar fetchers using the same `requests` + `@st.cache_data` pattern.
+
+Project conventions & gotchas
+- Single entrypoint: keep runtime logic in `app.py`. Small, local edits are preferred.
+- Caching: respect the existing TTLs. If adding network helpers, annotate with `@st.cache_data(ttl=43200)` unless you have a reason to pick a different TTL (document it).
+- Defensive parsing: Sleeper payloads vary. Reuse `_extract_entries_from_matchups` style: tolerant checks, fallbacks, and explicit numeric defaults (e.g., settings.get('fpts', 0)).
+- HTML embedding: custom table uses `components.html(...)` and a safe fallback to `st.dataframe` if embedding fails — follow that pattern when adding UI HTML.
+- Timezone: page shows last-updated in America/New_York using `zoneinfo.ZoneInfo` — respect that for timestamps.
+
+Developer workflows (reproducible)
+- Install & run (Windows PowerShell):
   pip install -r requirements.txt
   streamlit run app.py
-  ```
-- Quick verification: update a visible label or add a column and refresh the Streamlit page to confirm changes.
+- Quick verify: edit a visible label or add a column in `display_league_standings`, save, and refresh the Streamlit UI.
 
-Project conventions and patterns
-- Keep edits small and localized to `app.py`. Add helper functions in the same file when appropriate.
-- Use Streamlit caching decorators exactly as-is (`@st.cache_data(ttl=43200)`) for any network-bound helpers.
-- UI-first error handling: use `st.error` / `st.warning` with clear, actionable text (e.g., "Update LEAGUES in app.py — found placeholder ID").
-- Data shaping: roster metrics come from `roster['settings']` (fields like `wins`, `losses`, `fpts`, `fpts_against`). Ensure numeric defaults to avoid None values in pandas.
+Quality gates & validation
+- Minimal smoke test: run the app locally and confirm the page loads and the changes appear in the UI.
+- Keep `requirements.txt` changes documented and minimal.
+- There are no unit tests in the repo — prefer small manual verifications. If you add tests, include them and update README.
 
-Quick examples
-- Add a cached endpoint: replicate `fetch_rosters` pattern and annotate with `@st.cache_data(ttl=43200)`.
-- Add a new column to standings: extend the dict appended to `standings_data` inside `display_league_standings` and include the key in DataFrame column order.
+Concrete examples to guide edits
+- Add a cached endpoint: copy `fetch_rosters` style and annotate with `@st.cache_data(ttl=43200)`; return [] on empty results rather than None where convenient for downstream list-processing.
+- Add a column to standings: modify the dict appended to `standings_data` in `display_league_standings` and include that key in the DataFrame column order (the table rendering expects explicit column ordering).
+- Resolve team display: use `resolve_team_name_from_roster_id(roster_id, league_name, league_rosters, league_users)` to get consistent names for highlights and tables.
 
-Quality gates & review checklist
-- Keep changes backward-compatible and minimal. Run the app locally and confirm page loads and the modified UI element displays correctly.
-- Update `requirements.txt` only when required; document why in PR.
-- In PR description include: what changed, how to run locally, and one screenshot or expected visible effect.
+Files to inspect
+- `app.py` — single source of truth for behavior and UI.
+- `requirements.txt` — runtime deps (Streamlit, requests, pandas).
+- `README.md`, `SETUP_GUIDE.md`, `update_data.yml` — docs and scheduled-update config.
 
-Files to inspect when making changes
-- `app.py` — main app and the only runtime source file.
-- `requirements.txt` — list of runtime dependencies (Streamlit, requests, pandas).
-- `README.md`, `SETUP_GUIDE.md`, `update_data.yml` — docs and scheduled-update configuration used by maintainers.
+Do / Don't (short)
+- Do: keep edits local to `app.py`, preserve cache decorators & TTLs, prefer UI-friendly error messages (`st.error`, `st.warning`).
+- Don't: introduce secret management, broad architectural refactors, or change deployment assumptions without documenting them in `README.md`.
 
-Do / Don't summary
-- Do: make small, well-scoped edits in `app.py`, preserve cache decorators, use UI error messages, and run a local Streamlit smoke test.
-- Don't: introduce secret management, perform broad refactors across multiple files, or change deployment expectations without documenting them in `README.md`.
-
-If anything here is unclear or you'd like samples for a specific change (add column, new cached endpoint, UI tweak), tell me which area and I will iterate.
-
-If anything above is unclear or you want more detail (for example, a proposed code change or a suggested test), tell me which area to expand and I will iterate.
+If something is unclear or you'd like me to add an example edit (e.g., add a new cached endpoint, show how to add a standings column, or make a small UI tweak), say which area and I will update this file or create the code change.

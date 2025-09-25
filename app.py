@@ -877,6 +877,139 @@ def main():
                 """
                 render_html_block(html_closest)
 
+        # Insert a small blank spacer to separate the two rows visually (no visible divider)
+        try:
+            render_html_block("""
+            <div style='height:16px'></div>
+            """)
+        except Exception:
+            pass
+
+        # --- Additional season aggregate highlights (placed directly below the three single-week highlights)
+        try:
+            # Work on a copy and ensure numeric points
+            df_totals = df_season.copy()
+            df_totals['points'] = df_totals['points'].astype(float)
+
+            # Compute points against per row by summing group points and subtracting own points
+            group_cols = ['league', 'week', 'matchup_id']
+            group_sum = df_totals.groupby(group_cols)['points'].transform('sum')
+            df_totals['points_against'] = group_sum - df_totals['points']
+
+            # Aggregate per roster/team across the season
+            agg = df_totals.groupby(['roster_id', 'team', 'league'], as_index=False).agg(
+                season_points_for=('points', 'sum'),
+                season_points_against=('points_against', 'sum')
+            )
+
+            if not agg.empty:
+                season_top_total = agg.loc[agg['season_points_for'].idxmax()]
+                season_bottom_total = agg.loc[agg['season_points_for'].idxmin()]
+                season_top_against = agg.loc[agg['season_points_against'].idxmax()]
+            else:
+                season_top_total = season_bottom_total = season_top_against = None
+        except Exception:
+            season_top_total = season_bottom_total = season_top_against = None
+
+        # Render the three aggregated highlights directly below the single-week season highlights
+        col1b, col2b, col3b = st.columns(3)
+
+        with col1b:
+            # Season highest total points (green)
+            try:
+                display_team = season_top_total.get('team') if hasattr(season_top_total, 'get') else (season_top_total['team'] if season_top_total is not None else None)
+                display_league = season_top_total.get('league') if hasattr(season_top_total, 'get') else (season_top_total['league'] if season_top_total is not None else '')
+                display_points = float(season_top_total.get('season_points_for')) if hasattr(season_top_total, 'get') else float(season_top_total['season_points_for'])
+            except Exception:
+                display_team = None
+                display_league = ''
+                display_points = 0.0
+
+            inline_css = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);}
+            .sl-hl-muted{color:var(--sl-muted,#6c757d);} 
+            .sl-hl-success{color:var(--sl-success,#1e7e34);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-success{color:var(--sl-success,rgba(38,166,91,0.95)) !important}
+            }
+            </style>
+            """
+            html_top_total = f"""
+            {inline_css}
+            <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season highest total points</div>
+            <div class='sl-hl-primary' style='font-size:20px;font-weight:600'>{_html.escape(str(display_team or 'Team ?'))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(display_league))}</div>
+            <div class='sl-hl-success' style='font-size:20px;margin-top:6px'>{display_points:.2f} pts</div>
+            """
+            render_html_block(html_top_total)
+
+        with col2b:
+            # Season lowest total points (red)
+            try:
+                display_team = season_bottom_total.get('team') if hasattr(season_bottom_total, 'get') else (season_bottom_total['team'] if season_bottom_total is not None else None)
+                display_league = season_bottom_total.get('league') if hasattr(season_bottom_total, 'get') else (season_bottom_total['league'] if season_bottom_total is not None else '')
+                display_points = float(season_bottom_total.get('season_points_for')) if hasattr(season_bottom_total, 'get') else float(season_bottom_total['season_points_for'])
+            except Exception:
+                display_team = None
+                display_league = ''
+                display_points = 0.0
+
+            inline_css_bottom = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);} 
+            .sl-hl-muted{color:var(--sl-muted,#6c757d);} 
+            .sl-hl-danger{color:var(--sl-danger,#e53935);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-danger{color:var(--sl-danger,rgba(239,83,80,0.95)) !important}
+            }
+            </style>
+            """
+            html_bottom_total = f"""
+            {inline_css_bottom}
+            <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season lowest total points</div>
+            <div class='sl-hl-primary' style='font-size:20px;font-weight:600'>{_html.escape(str(display_team or 'Team ?'))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(display_league))}</div>
+            <div class='sl-hl-danger' style='font-size:20px;margin-top:6px'>{display_points:.2f} pts</div>
+            """
+            render_html_block(html_bottom_total)
+
+        with col3b:
+            # Season highest points against (red)
+            try:
+                display_team = season_top_against.get('team') if hasattr(season_top_against, 'get') else (season_top_against['team'] if season_top_against is not None else None)
+                display_league = season_top_against.get('league') if hasattr(season_top_against, 'get') else (season_top_against['league'] if season_top_against is not None else '')
+                display_points = float(season_top_against.get('season_points_against')) if hasattr(season_top_against, 'get') else float(season_top_against['season_points_against'])
+            except Exception:
+                display_team = None
+                display_league = ''
+                display_points = 0.0
+
+            inline_css_against = """
+            <style>
+            .sl-hl-primary{color:var(--sl-primary,#000000);font-weight:600}
+            .sl-hl-muted{color:var(--sl-muted,#6c757d)}
+            .sl-hl-danger{color:var(--sl-danger,#e53935);font-weight:600}
+            @media (prefers-color-scheme: dark){
+              .sl-hl-primary{color:var(--sl-primary,#e6eef6) !important}
+              .sl-hl-muted{color:var(--sl-muted,#aab9c6) !important}
+              .sl-hl-danger{color:var(--sl-danger,rgba(239,83,80,0.95)) !important}
+            }
+            </style>
+            """
+            html_against_total = f"""
+            {inline_css_against}
+            <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Season highest points against</div>
+            <div class='sl-hl-primary' style='font-size:20px'>{_html.escape(str(display_team or 'Team ?'))}</div>
+            <div class='sl-hl-muted' style='font-size:13px'>{_html.escape(str(display_league))}</div>
+            <div class='sl-hl-danger' style='font-size:20px;margin-top:6px'>{display_points:.2f} pts</div>
+            """
+            render_html_block(html_against_total)
+
     st.divider()
     # Display all leagues (first entry in LEAGUES is the top league)
     for idx, (league_name, league_id) in enumerate(LEAGUES.items()):
