@@ -575,9 +575,9 @@ def main():
             display_top = top_team or (f"Team {int(top.get('roster_id'))}" if top is not None and top.get('roster_id') is not None else "Team ?")
             html_top = f"""
             <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Highest scoring team</div>
-            <div style='font-size:20px;font-weight:600'>{_html.escape(str(display_top))}</div>
-            <div style='font-size:13px;color:#6c757d'>{_html.escape(str(top_league))}</div>
-            <div style='font-size:20px;margin-top:6px;color:#1e7e34;font-weight:600'>{float(top_points):.2f} pts</div>
+            <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(display_top))}</div>
+            <div style='font-size:13px;color:var(--sl-muted, #6c757d)'>{_html.escape(str(top_league))}</div>
+            <div style='font-size:20px;margin-top:6px;color:var(--sl-success, #1e7e34);font-weight:600'>{float(top_points):.2f} pts</div>
             """
             st.markdown(html_top, unsafe_allow_html=True)
 
@@ -585,9 +585,9 @@ def main():
             display_bottom = bottom_team or (f"Team {int(bottom.get('roster_id'))}" if bottom is not None and bottom.get('roster_id') is not None else "Team ?")
             html_bottom = f"""
             <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Lowest scoring team</div>
-            <div style='font-size:20px;font-weight:600'>{_html.escape(str(display_bottom))}</div>
-            <div style='font-size:13px;color:#6c757d'>{_html.escape(str(bottom_league))}</div>
-            <div style='font-size:20px;margin-top:6px;color:#e53935;font-weight:600'>{float(bottom_points):.2f} pts</div>
+            <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(display_bottom))}</div>
+            <div style='font-size:13px;color:var(--sl-muted, #6c757d)'>{_html.escape(str(bottom_league))}</div>
+            <div style='font-size:20px;margin-top:6px;color:var(--sl-danger, #e53935);font-weight:600'>{float(bottom_points):.2f} pts</div>
             """
             st.markdown(html_bottom, unsafe_allow_html=True)
 
@@ -596,16 +596,16 @@ def main():
                 t1, t2, diff = closest_display
                 html_closest = f"""
                 <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Closest matchup</div>
-                <div style='font-size:20px;font-weight:600'>{_html.escape(str(t1))}</div>
-                <div style='font-size:13px;color:#6c757d'>vs</div>
-                <div style='font-size:20px;font-weight:600'>{_html.escape(str(t2))}</div>
-                <div style='font-size:20px;margin-top:6px;color:#000000;font-weight:600'>Δ {float(diff):.2f} pts</div>
+                <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(t1))}</div>
+                <div style='font-size:13px;color:var(--sl-muted, #6c757d)'>vs</div>
+                <div style='font-size:20px;font-weight:600;color:var(--sl-primary, #000000)'>{_html.escape(str(t2))}</div>
+                <div style='font-size:20px;margin-top:6px;color:var(--sl-primary, #000000);font-weight:600'>Δ {float(diff):.2f} pts</div>
                 """
                 st.markdown(html_closest, unsafe_allow_html=True)
             else:
                 html_closest = f"""
                 <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Closest matchup</div>
-                <div style='font-size:14px;color:#6c757d'>No close matchups found</div>
+                <div style='font-size:14px;color:var(--sl-muted, #6c757d)'>No close matchups found</div>
                 """
                 st.markdown(html_closest, unsafe_allow_html=True)
 
