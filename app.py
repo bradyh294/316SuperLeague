@@ -62,10 +62,10 @@ def fetch_users(league_id):
 
 
 @st.cache_data(ttl=43200)
-def fetch_matchups(league_id, week=None):
+def fetch_matchups(league_id, week=None, max_week=18):
     """Fetch matchups for a league.
 
-    If `week` is provided, fetch /matchups/{week}. If not, probe weeks 1..18 and return a combined list of matchups found.
+    If `week` is provided, fetch /matchups/{week}. If not, probe weeks 1..max_week and return a combined list of matchups found.
     Returns a list (possibly empty) or None on network error.
     """
     try:
@@ -77,8 +77,19 @@ def fetch_matchups(league_id, week=None):
             return []
 
         # No specific week: probe common week range and collect results
+        if max_week is None:
+            limit = 18
+        else:
+            try:
+                limit = int(max_week)
+            except (TypeError, ValueError):
+                limit = 18
+        if limit < 1:
+            return []
+
+        limit = min(limit, 18)
         collected = []
-        for w in range(1, 19):
+        for w in range(1, limit + 1):
             url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{w}"
             resp = requests.get(url, timeout=6)
             if resp.status_code == 200:
@@ -669,51 +680,66 @@ def main():
         st.divider()
     st.header("Season highlights")
 
-    # Collect season entries across all leagues (probe weeks via fetch_matchups)
-    season_entries = []
-    for league_name, league_id in LEAGUES.items():
-        raw = fetch_matchups(league_id) or []
-        entries = _extract_entries_from_matchups(raw)
-        for e in entries:
-            # skip entries without numeric points
-            pts = e.get('points')
-            if pts is None:
-                continue
-            e_copy = dict(e)
-            e_copy['league'] = league_name
-            roster_id = e_copy.get('roster_id')
-            if roster_id is not None:
-                e_copy['team'] = resolve_team_name_from_roster_id(roster_id, league_name, league_rosters, league_users)
-            season_entries.append(e_copy)
+    # Determine the latest completed week once so we can limit season fetches
+    max_completed_week = None
+    if state and isinstance(state.get('week'), int):
+        max_completed_week = max(state.get('week') - 1, 0)
 
-    if not season_entries:
-        st.info("No season matchup data available to compute season highlights.")
-    else:
-        # Restrict to completed weeks only.
+    if max_completed_week is None:
         try:
             nfl_state = fetch_nfl_state()
         except Exception:
             nfl_state = None
-
-        max_completed_week = None
         if nfl_state and isinstance(nfl_state.get('week'), int):
-            # state.week is the current in-progress week; completed weeks are <= week-1
             max_completed_week = max(nfl_state.get('week') - 1, 0)
 
-        # If we couldn't get state, infer completed weeks from data (entries with numeric points)
-        if max_completed_week is None:
-            weeks_with_points = [e.get('week') for e in season_entries if e.get('week') is not None]
-            if weeks_with_points:
-                max_completed_week = max(weeks_with_points)
-
-        if max_completed_week is not None:
-            # keep only entries where week is known and <= max_completed_week
-            season_entries = [e for e in season_entries if (e.get('week') is not None and int(e.get('week')) <= int(max_completed_week))]
+    # Collect season entries across all leagues (probe only completed weeks when known)
+    season_entries = []
+    if max_completed_week == 0:
+        st.info("No completed-week season data available to compute season highlights.")
+    else:
+        fetch_limit = max_completed_week if max_completed_week not in (None, 0) else None
+        for league_name, league_id in LEAGUES.items():
+            raw = fetch_matchups(league_id, max_week=fetch_limit) or []
+            entries = _extract_entries_from_matchups(raw)
+            for e in entries:
+                pts = e.get('points')
+                if pts is None:
+                    continue
+                e_copy = dict(e)
+                e_copy['league'] = league_name
+                roster_id = e_copy.get('roster_id')
+                if roster_id is not None:
+                    e_copy['team'] = resolve_team_name_from_roster_id(roster_id, league_name, league_rosters, league_users)
+                season_entries.append(e_copy)
 
         if not season_entries:
-            st.info("No completed-week season data available to compute season highlights.")
-            # skip the rest
-            season_entries = []
+            st.info("No season matchup data available to compute season highlights.")
+        else:
+            if max_completed_week is None:
+                weeks_with_points = [e.get('week') for e in season_entries if e.get('week') is not None]
+                if weeks_with_points:
+                    max_completed_week = max(weeks_with_points)
+
+            if max_completed_week is not None:
+                try:
+                    limit_int = int(max_completed_week)
+                except (TypeError, ValueError):
+                    limit_int = None
+                if limit_int is not None:
+                    filtered_entries = []
+                    for entry in season_entries:
+                        try:
+                            wk = int(entry.get('week'))
+                        except (TypeError, ValueError):
+                            continue
+                        if wk <= limit_int:
+                            filtered_entries.append(entry)
+                    season_entries = filtered_entries
+
+            if not season_entries:
+                st.info("No completed-week season data available to compute season highlights.")
+                season_entries = []
         
     if not season_entries:
         # nothing to do further
