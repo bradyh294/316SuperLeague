@@ -1,7 +1,13 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
-from datetime import datetime
+import json
+import os
+import sqlite3
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 import html as _html
@@ -23,40 +29,629 @@ LEAGUES = {
     "League V": "1256993935205609472"
 }
 
+
+CACHE_TTL_SECONDS = 43200
+NFL_STATE_TTL_SECONDS = 3600
+CACHE_ENV_VAR = "SL_CACHE_DB_PATH"
+_NULL_SENTINEL = "__NULL__"
+
+try:
+    _CACHE_DB_PATH_VALUE = os.environ.get(CACHE_ENV_VAR)
+except Exception:
+    _CACHE_DB_PATH_VALUE = None
+
+if _CACHE_DB_PATH_VALUE:
+    try:
+        _candidate = Path(_CACHE_DB_PATH_VALUE).expanduser()
+        if not _candidate.is_absolute():
+            _candidate = Path.cwd() / _candidate
+        CACHE_DB_PATH: Optional[Path] = _candidate
+    except Exception:
+        CACHE_DB_PATH = None
+else:
+    CACHE_DB_PATH = None
+
+
+@st.cache_resource(show_spinner=False)
+def _get_db_connection(db_path: Optional[str]):
+    if not db_path:
+        return None
+    path_obj = Path(db_path)
+    try:
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    conn = sqlite3.connect(path_obj, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    with conn:
+        conn.execute("PRAGMA foreign_keys = ON;")
+    _initialize_database(conn)
+    return conn
+
+
+def get_db_connection():
+    if CACHE_DB_PATH is None:
+        return None
+    return _get_db_connection(str(CACHE_DB_PATH))
+
+
+def _initialize_database(conn: sqlite3.Connection) -> None:
+    schema = """
+    CREATE TABLE IF NOT EXISTS league (
+        league_id TEXT PRIMARY KEY,
+        name TEXT,
+        season INTEGER,
+        status TEXT,
+        raw_payload TEXT NOT NULL,
+        fetched_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS user (
+        user_id TEXT PRIMARY KEY,
+        display_name TEXT,
+        username TEXT,
+        team_name TEXT,
+        avatar TEXT,
+        raw_payload TEXT NOT NULL,
+        fetched_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS league_user (
+        league_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT,
+        is_owner INTEGER DEFAULT 0,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (league_id, user_id),
+        FOREIGN KEY (league_id) REFERENCES league(league_id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES user(user_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS roster (
+        league_id TEXT NOT NULL,
+        roster_id INTEGER NOT NULL,
+        owner_id TEXT,
+        wins INTEGER,
+        losses INTEGER,
+        ties INTEGER,
+        points_for REAL,
+        points_against REAL,
+        settings_json TEXT,
+        metadata_json TEXT,
+        raw_payload TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (league_id, roster_id)
+    );
+    CREATE TABLE IF NOT EXISTS matchup (
+        league_id TEXT NOT NULL,
+        week INTEGER NOT NULL,
+        matchup_id INTEGER NOT NULL,
+        roster_id INTEGER NOT NULL,
+        points REAL,
+        projected_points REAL,
+        is_playoff INTEGER,
+        is_consolation INTEGER,
+        players_json TEXT,
+        raw_payload TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (league_id, week, matchup_id, roster_id)
+    );
+    CREATE TABLE IF NOT EXISTS fetch_log (
+        endpoint TEXT NOT NULL,
+        league_key TEXT NOT NULL,
+        week_key TEXT NOT NULL,
+        status_code INTEGER,
+        error TEXT,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (endpoint, league_key, week_key)
+    );
+    CREATE TABLE IF NOT EXISTS nfl_state (
+        state_key TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        fetched_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_matchup_league_week ON matchup(league_id, week);
+    CREATE INDEX IF NOT EXISTS idx_roster_league_owner ON roster(league_id, owner_id);
+    """
+    with conn:
+        conn.executescript(schema)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _is_fresh(fetched_at: Optional[str], ttl_seconds: int) -> bool:
+    stamp = _parse_iso(fetched_at)
+    if stamp is None:
+        return False
+    return datetime.now(timezone.utc) - stamp <= timedelta(seconds=ttl_seconds)
+
+
+def _normalize_key(value: Optional[Any]) -> str:
+    if value is None:
+        return _NULL_SENTINEL
+    return str(value)
+
+
+def _get_cached_timestamp(conn: sqlite3.Connection, endpoint: str, league_key: str, week_key: str) -> Optional[str]:
+    cur = conn.execute(
+        "SELECT fetched_at FROM fetch_log WHERE endpoint = ? AND league_key = ? AND week_key = ?",
+        (endpoint, league_key, week_key),
+    )
+    row = cur.fetchone()
+    return row['fetched_at'] if row else None
+
+
+def _record_fetch_log(conn: sqlite3.Connection, endpoint: str, league_key: str, week_key: str, status_code: Optional[int], error: Optional[str] = None) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO fetch_log (endpoint, league_key, week_key, status_code, error, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (endpoint, league_key, week_key, status_code, error, _now_iso()),
+        )
+
+
+def _json_dumps(payload: Any) -> str:
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _load_cached_json(conn: sqlite3.Connection, query: str, params: Iterable[Any]) -> Optional[Any]:
+    try:
+        cur = conn.execute(query, tuple(params))
+        row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        payload = row["raw_payload"]
+    except Exception:
+        try:
+            payload = row[0]
+        except Exception:
+            return None
+    try:
+        return json.loads(payload)
+    except Exception:
+        return None
+
+
+def _ensure_league_stub(conn: sqlite3.Connection, league_id: str) -> None:
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO league (league_id, name, season, status, raw_payload, fetched_at) VALUES (?, NULL, NULL, NULL, ?, ?)",
+                (str(league_id), _json_dumps({}), _now_iso()),
+            )
+    except Exception:
+        pass
+
+
+def _to_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "t"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "f"}:
+            return False
+    return None
+
+
+def _load_cached_matchups(conn: sqlite3.Connection, league_id: str, week: int) -> Optional[list]:
+    try:
+        cur = conn.execute(
+            "SELECT raw_payload FROM matchup WHERE league_id = ? AND week = ? ORDER BY matchup_id, roster_id",
+            (str(league_id), int(week)),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    items: list = []
+    for row in rows:
+        try:
+            items.append(json.loads(row['raw_payload']))
+        except Exception:
+            continue
+    return items or None
+
+
+def _store_matchups(conn: sqlite3.Connection, league_id: str, week: int, items: Iterable[Any]) -> Optional[list]:
+    normalized_items = []
+    fetched_at = _now_iso()
+    try:
+        with conn:
+            conn.execute(
+                "DELETE FROM matchup WHERE league_id = ? AND week = ?",
+                (str(league_id), int(week)),
+            )
+            for entry in items:
+                if entry is None:
+                    continue
+                normalized = dict(entry)
+                if normalized.get('week') is None:
+                    normalized['week'] = int(week)
+                roster_id = _to_int(normalized.get('roster_id'))
+                matchup_id = _to_int(normalized.get('matchup_id'))
+                if roster_id is None or matchup_id is None:
+                    continue
+                normalized_items.append(normalized)
+                players = normalized.get('players')
+                conn.execute(
+                    "INSERT OR REPLACE INTO matchup (league_id, week, matchup_id, roster_id, points, projected_points, is_playoff, is_consolation, players_json, raw_payload, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(league_id),
+                        int(week),
+                        matchup_id,
+                        roster_id,
+                        _to_float(normalized.get('points')),
+                        _to_float(normalized.get('projected_points')),
+                        1 if _to_bool(normalized.get('is_playoff')) else 0,
+                        1 if _to_bool(normalized.get('is_consolation')) else 0,
+                        _json_dumps(players) if players is not None else None,
+                        _json_dumps(normalized),
+                        fetched_at,
+                    ),
+                )
+    except Exception:
+        return None
+    return normalized_items or []
+
 # Cache data for 12 hours (43200 seconds)
 @st.cache_data(ttl=43200)
 def fetch_league_info(league_id):
     """Fetch basic league information"""
+    conn = get_db_connection()
+    league_key = _normalize_key(league_id)
+    week_key = _NULL_SENTINEL
+
+    if conn:
+        try:
+            cached_ts = _get_cached_timestamp(conn, 'league', league_key, week_key)
+            if cached_ts and _is_fresh(cached_ts, CACHE_TTL_SECONDS):
+                cached = _load_cached_json(
+                    conn,
+                    "SELECT raw_payload FROM league WHERE league_id = ?",
+                    (str(league_id),),
+                )
+                if cached is not None:
+                    return cached
+        except Exception:
+            pass
+
     try:
-        response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}")
-        if response.status_code == 200:
-            return response.json()
+        response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}", timeout=10)
+        status_code = getattr(response, 'status_code', None)
+        if status_code == 200:
+            data = response.json()
+            if conn and data:
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO league (league_id, name, season, status, raw_payload, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                str(league_id),
+                                data.get('name'),
+                                data.get('season'),
+                                data.get('status'),
+                                _json_dumps(data),
+                                _now_iso(),
+                            ),
+                        )
+                    _record_fetch_log(conn, 'league', league_key, week_key, status_code, None)
+                except Exception:
+                    pass
+            return data
+
+        if conn:
+            try:
+                _record_fetch_log(conn, 'league', league_key, week_key, status_code, f'status {status_code}')
+            except Exception:
+                pass
+            fallback = _load_cached_json(
+                conn,
+                "SELECT raw_payload FROM league WHERE league_id = ?",
+                (str(league_id),),
+            )
+            if fallback is not None:
+                return fallback
         return None
     except Exception as e:
+        if conn:
+            try:
+                _record_fetch_log(conn, 'league', league_key, week_key, None, str(e))
+            except Exception:
+                pass
+            fallback = _load_cached_json(
+                conn,
+                "SELECT raw_payload FROM league WHERE league_id = ?",
+                (str(league_id),),
+            )
+            if fallback is not None:
+                return fallback
         st.error(f"Error fetching league info: {e}")
         return None
 
 @st.cache_data(ttl=43200)
 def fetch_rosters(league_id):
     """Fetch rosters for a league"""
+    conn = get_db_connection()
+    league_key = _normalize_key(league_id)
+    week_key = _NULL_SENTINEL
+
+    if conn:
+        try:
+            cached_ts = _get_cached_timestamp(conn, 'rosters', league_key, week_key)
+            if cached_ts and _is_fresh(cached_ts, CACHE_TTL_SECONDS):
+                try:
+                    cur = conn.execute(
+                        "SELECT raw_payload FROM roster WHERE league_id = ? ORDER BY roster_id",
+                        (str(league_id),),
+                    )
+                    rows = cur.fetchall()
+                except Exception:
+                    rows = None
+                if rows:
+                    payloads = []
+                    for row in rows:
+                        try:
+                            payloads.append(json.loads(row['raw_payload']))
+                        except Exception:
+                            continue
+                    if payloads:
+                        return payloads
+        except Exception:
+            pass
+
     try:
-        response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/rosters")
-        if response.status_code == 200:
-            return response.json()
+        response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/rosters", timeout=10)
+        status_code = getattr(response, 'status_code', None)
+        if status_code == 200:
+            data = response.json()
+            if conn and isinstance(data, list):
+                try:
+                    _ensure_league_stub(conn, league_id)
+                    with conn:
+                        conn.execute("DELETE FROM roster WHERE league_id = ?", (str(league_id),))
+                        fetched_at = _now_iso()
+                        for roster in data:
+                            roster_id = _to_int(roster.get('roster_id'))
+                            if roster_id is None:
+                                continue
+                            settings = roster.get('settings') or {}
+                            metadata = roster.get('metadata') or {}
+                            conn.execute(
+                                "INSERT OR REPLACE INTO roster (league_id, roster_id, owner_id, wins, losses, ties, points_for, points_against, settings_json, metadata_json, raw_payload, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    str(league_id),
+                                    roster_id,
+                                    roster.get('owner_id'),
+                                    _to_int(settings.get('wins')),
+                                    _to_int(settings.get('losses')),
+                                    _to_int(settings.get('ties')),
+                                    _to_float(settings.get('fpts')),
+                                    _to_float(settings.get('fpts_against')),
+                                    _json_dumps(settings),
+                                    _json_dumps(metadata),
+                                    _json_dumps(roster),
+                                    fetched_at,
+                                ),
+                            )
+                    _record_fetch_log(conn, 'rosters', league_key, week_key, status_code, None)
+                except Exception:
+                    pass
+            return data
+
+        if conn:
+            try:
+                _record_fetch_log(conn, 'rosters', league_key, week_key, status_code, f'status {status_code}')
+            except Exception:
+                pass
+            try:
+                cur = conn.execute(
+                    "SELECT raw_payload FROM roster WHERE league_id = ? ORDER BY roster_id",
+                    (str(league_id),),
+                )
+                rows = cur.fetchall()
+            except Exception:
+                rows = None
+            if rows:
+                payloads = []
+                for row in rows:
+                    try:
+                        payloads.append(json.loads(row['raw_payload']))
+                    except Exception:
+                        continue
+                if payloads:
+                    return payloads
         return None
     except Exception as e:
+        if conn:
+            try:
+                _record_fetch_log(conn, 'rosters', league_key, week_key, None, str(e))
+            except Exception:
+                pass
+            try:
+                cur = conn.execute(
+                    "SELECT raw_payload FROM roster WHERE league_id = ? ORDER BY roster_id",
+                    (str(league_id),),
+                )
+                rows = cur.fetchall()
+            except Exception:
+                rows = None
+            if rows:
+                payloads = []
+                for row in rows:
+                    try:
+                        payloads.append(json.loads(row['raw_payload']))
+                    except Exception:
+                        continue
+                if payloads:
+                    return payloads
         st.error(f"Error fetching rosters: {e}")
         return None
 
 @st.cache_data(ttl=43200)
 def fetch_users(league_id):
     """Fetch users for a league"""
+    conn = get_db_connection()
+    league_key = _normalize_key(league_id)
+    week_key = _NULL_SENTINEL
+
+    if conn:
+        try:
+            cached_ts = _get_cached_timestamp(conn, 'users', league_key, week_key)
+            if cached_ts and _is_fresh(cached_ts, CACHE_TTL_SECONDS):
+                try:
+                    cur = conn.execute(
+                        "SELECT u.raw_payload FROM league_user lu JOIN user u ON u.user_id = lu.user_id WHERE lu.league_id = ?",
+                        (str(league_id),),
+                    )
+                    rows = cur.fetchall()
+                except Exception:
+                    rows = None
+                if rows:
+                    payloads = []
+                    for row in rows:
+                        try:
+                            payloads.append(json.loads(row['raw_payload']))
+                        except Exception:
+                            continue
+                    if payloads:
+                        return payloads
+        except Exception:
+            pass
+
     try:
-        response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/users")
-        if response.status_code == 200:
-            return response.json()
+        response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/users", timeout=10)
+        status_code = getattr(response, 'status_code', None)
+        if status_code == 200:
+            data = response.json()
+            if conn and isinstance(data, list):
+                try:
+                    _ensure_league_stub(conn, league_id)
+                    fetched_at = _now_iso()
+                    with conn:
+                        for user in data:
+                            user_id = user.get('user_id')
+                            if not user_id:
+                                continue
+                            metadata = user.get('metadata') or {}
+                            conn.execute(
+                                "INSERT OR REPLACE INTO user (user_id, display_name, username, team_name, avatar, raw_payload, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    str(user_id),
+                                    user.get('display_name'),
+                                    user.get('username'),
+                                    metadata.get('team_name'),
+                                    user.get('avatar'),
+                                    _json_dumps(user),
+                                    fetched_at,
+                                ),
+                            )
+                        conn.execute("DELETE FROM league_user WHERE league_id = ?", (str(league_id),))
+                        for user in data:
+                            user_id = user.get('user_id')
+                            if not user_id:
+                                continue
+                            metadata = user.get('metadata') or {}
+                            role = metadata.get('role')
+                            bool_val = _to_bool(metadata.get('is_owner'))
+                            if bool_val is None:
+                                bool_val = _to_bool(user.get('is_owner'))
+                            conn.execute(
+                                "INSERT OR REPLACE INTO league_user (league_id, user_id, role, is_owner, fetched_at) VALUES (?, ?, ?, ?, ?)",
+                                (
+                                    str(league_id),
+                                    str(user_id),
+                                    role,
+                                    1 if bool_val else 0,
+                                    fetched_at,
+                                ),
+                            )
+                    _record_fetch_log(conn, 'users', league_key, week_key, status_code, None)
+                except Exception:
+                    pass
+            return data
+
+        if conn:
+            try:
+                _record_fetch_log(conn, 'users', league_key, week_key, status_code, f'status {status_code}')
+            except Exception:
+                pass
+            try:
+                cur = conn.execute(
+                    "SELECT u.raw_payload FROM league_user lu JOIN user u ON u.user_id = lu.user_id WHERE lu.league_id = ?",
+                    (str(league_id),),
+                )
+                rows = cur.fetchall()
+            except Exception:
+                rows = None
+            if rows:
+                payloads = []
+                for row in rows:
+                    try:
+                        payloads.append(json.loads(row['raw_payload']))
+                    except Exception:
+                        continue
+                if payloads:
+                    return payloads
         return None
     except Exception as e:
+        if conn:
+            try:
+                _record_fetch_log(conn, 'users', league_key, week_key, None, str(e))
+            except Exception:
+                pass
+            try:
+                cur = conn.execute(
+                    "SELECT u.raw_payload FROM league_user lu JOIN user u ON u.user_id = lu.user_id WHERE lu.league_id = ?",
+                    (str(league_id),),
+                )
+                rows = cur.fetchall()
+            except Exception:
+                rows = None
+            if rows:
+                payloads = []
+                for row in rows:
+                    try:
+                        payloads.append(json.loads(row['raw_payload']))
+                    except Exception:
+                        continue
+                if payloads:
+                    return payloads
         st.error(f"Error fetching users: {e}")
         return None
 
@@ -68,45 +663,110 @@ def fetch_matchups(league_id, week=None, max_week=18):
     If `week` is provided, fetch /matchups/{week}. If not, probe weeks 1..max_week and return a combined list of matchups found.
     Returns a list (possibly empty) or None on network error.
     """
-    try:
-        if week is not None:
-            url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{week}"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                return resp.json()
-            return []
+    conn = get_db_connection()
+    league_key = _normalize_key(league_id)
+    errors = []
 
-        # No specific week: probe common week range and collect results
-        if max_week is None:
-            limit = 18
-        else:
-            try:
-                limit = int(max_week)
-            except (TypeError, ValueError):
-                limit = 18
-        if limit < 1:
-            return []
-
-        limit = min(limit, 18)
-        collected = []
-        for w in range(1, limit + 1):
-            url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{w}"
-            resp = requests.get(url, timeout=6)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    # attach week if not present in items
-                    if isinstance(data, list):
-                        for item in data:
-                            if isinstance(item, dict) and 'week' not in item:
-                                item['week'] = w
-                        collected.extend(data)
-                except Exception:
-                    continue
-        return collected
-    except Exception as e:
-        st.error(f"Error fetching matchups: {e}")
+    def _cached_week(target_week: int):
+        if not conn:
+            return None
+        try:
+            cached_ts = _get_cached_timestamp(conn, 'matchups', league_key, _normalize_key(target_week))
+            if cached_ts and _is_fresh(cached_ts, CACHE_TTL_SECONDS):
+                return _load_cached_matchups(conn, league_id, int(target_week))
+        except Exception:
+            return None
         return None
+
+    def _fetch_week(target_week: int):
+        cached = _cached_week(target_week)
+        if cached is not None:
+            return cached
+
+        try:
+            url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{target_week}"
+            resp = requests.get(url, timeout=10)
+            status_code = getattr(resp, 'status_code', None)
+            if status_code == 200:
+                data = resp.json()
+                list_data = data if isinstance(data, list) else []
+                recorded = False
+                if conn and isinstance(list_data, list):
+                    try:
+                        _ensure_league_stub(conn, league_id)
+                        stored = _store_matchups(conn, league_id, int(target_week), list_data)
+                        if stored is not None:
+                            list_data = stored
+                        _record_fetch_log(conn, 'matchups', league_key, _normalize_key(target_week), status_code, None)
+                        recorded = True
+                    except Exception:
+                        pass
+                if conn and not recorded:
+                    try:
+                        _record_fetch_log(conn, 'matchups', league_key, _normalize_key(target_week), status_code, None)
+                    except Exception:
+                        pass
+                try:
+                    week_int = int(target_week)
+                except (TypeError, ValueError):
+                    week_int = None
+                if week_int is not None and isinstance(list_data, list):
+                    for item in list_data:
+                        if isinstance(item, dict) and item.get('week') is None:
+                            item['week'] = week_int
+                return list_data if isinstance(list_data, list) else []
+
+            if conn:
+                try:
+                    _record_fetch_log(conn, 'matchups', league_key, _normalize_key(target_week), status_code, f'status {status_code}')
+                except Exception:
+                    pass
+                fallback = _load_cached_matchups(conn, league_id, int(target_week))
+                if fallback is not None:
+                    return fallback
+            return []
+        except Exception as exc:
+            errors.append(exc)
+            if conn:
+                try:
+                    _record_fetch_log(conn, 'matchups', league_key, _normalize_key(target_week), None, str(exc))
+                except Exception:
+                    pass
+                fallback = _load_cached_matchups(conn, league_id, int(target_week))
+                if fallback is not None:
+                    return fallback
+            return None
+
+    if week is not None:
+        result = _fetch_week(int(week))
+        if result is None:
+            if errors:
+                st.error(f"Error fetching matchups: {errors[0]}")
+            return None
+        return result
+
+    if max_week is None:
+        limit = 18
+    else:
+        try:
+            limit = int(max_week)
+        except (TypeError, ValueError):
+            limit = 18
+    if limit < 1:
+        return []
+
+    limit = min(limit, 18)
+    collected = []
+    for w in range(1, limit + 1):
+        week_result = _fetch_week(w)
+        if isinstance(week_result, list):
+            collected.extend(week_result)
+
+    if not collected and errors:
+        st.error(f"Error fetching matchups: {errors[0]}")
+        return None
+
+    return collected
 
 
 def _extract_entries_from_matchups(raw_matchups):
@@ -143,13 +803,53 @@ def _extract_entries_from_matchups(raw_matchups):
 @st.cache_data(ttl=3600)
 def fetch_nfl_state():
     """Fetch NFL state from Sleeper (week, season, etc)."""
+    conn = get_db_connection()
+    cached_payload = None
+    cached_ts = None
+    if conn:
+        try:
+            cur = conn.execute("SELECT payload, fetched_at FROM nfl_state WHERE state_key = ?", ('nfl',))
+            row = cur.fetchone()
+        except Exception:
+            row = None
+        if row:
+            try:
+                cached_payload = json.loads(row['payload'])
+            except Exception:
+                cached_payload = None
+            cached_ts = row['fetched_at']
+            if cached_ts and _is_fresh(cached_ts, NFL_STATE_TTL_SECONDS) and cached_payload is not None:
+                return cached_payload
+
     try:
         resp = requests.get("https://api.sleeper.app/v1/state/nfl", timeout=6)
-        if resp.status_code == 200:
-            return resp.json()
-        return None
-    except Exception:
-        return None
+        status_code = getattr(resp, 'status_code', None)
+        if status_code == 200:
+            data = resp.json()
+            if conn and data is not None:
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO nfl_state (state_key, payload, fetched_at) VALUES (?, ?, ?)",
+                            ('nfl', _json_dumps(data), _now_iso()),
+                        )
+                    _record_fetch_log(conn, 'nfl_state', _NULL_SENTINEL, _NULL_SENTINEL, status_code, None)
+                except Exception:
+                    pass
+            return data
+        if conn:
+            try:
+                _record_fetch_log(conn, 'nfl_state', _NULL_SENTINEL, _NULL_SENTINEL, status_code, f'status {status_code}')
+            except Exception:
+                pass
+        return cached_payload
+    except Exception as exc:
+        if conn:
+            try:
+                _record_fetch_log(conn, 'nfl_state', _NULL_SENTINEL, _NULL_SENTINEL, None, str(exc))
+            except Exception:
+                pass
+        return cached_payload
 
 
 def find_latest_completed_week(all_entries, completeness_threshold=0.8):

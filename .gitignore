@@ -72,3 +72,6 @@ Thumbs.db
 # Cache files
 sleeper_cache/
 *.cache
+
+# SQLite cache file
+cache.db
