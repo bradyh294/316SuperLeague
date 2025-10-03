@@ -75,3 +75,6 @@ sleeper_cache/
 
 # SQLite cache file
 cache.db
+
+# Private league configuration
+leagues.json

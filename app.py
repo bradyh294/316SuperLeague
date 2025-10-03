@@ -5,7 +5,8 @@ import json
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
+from collections.abc import Iterable as IterableABC, Mapping as MappingABC
 
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -20,16 +21,135 @@ st.set_page_config(
     layout="wide"
 )
 
-# League configuration - YOU WILL EDIT THIS SECTION
-LEAGUES = {
-    "League I": "1264438284327587840",
-    "League II": "1259988024255578112", 
-    "League III": "1266580171679334401",
-    "League IV": "1256735075073011712",
-    "League V": "1256993935205609472"
-}
+# League configuration
+LEAGUES_ENV_VAR = "SL_LEAGUES"
+LEAGUES_FILE_ENV_VAR = "SL_LEAGUES_FILE"
+DEFAULT_LEAGUES_FILENAME = "leagues.json"
 
 
+def _normalize_league_mapping(raw: Any) -> Dict[str, str]:
+    if isinstance(raw, MappingABC):
+        result: Dict[str, str] = {}
+        for name, league_id in raw.items():
+            if league_id is None:
+                continue
+            league_id_str = str(league_id).strip()
+            if not league_id_str:
+                continue
+            result[str(name)] = league_id_str
+        return result
+    if isinstance(raw, IterableABC) and not isinstance(raw, (str, bytes, bytearray)):
+        normalized: Dict[str, str] = {}
+        for item in raw:
+            if isinstance(item, MappingABC):
+                name = item.get("name") or item.get("league") or item.get("label")
+                league_id = item.get("id") or item.get("league_id")
+                if name and league_id:
+                    league_id_str = str(league_id).strip()
+                    if league_id_str:
+                        normalized[str(name)] = league_id_str
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                name, league_id = item[0], item[1]
+                if league_id:
+                    league_id_str = str(league_id).strip()
+                    if league_id_str:
+                        normalized[str(name)] = league_id_str
+        return normalized
+    return {}
+
+
+def _load_leagues_from_secrets() -> Dict[str, str]:
+    try:
+        secrets_obj = getattr(st, "secrets", None)
+    except Exception:
+        secrets_obj = None
+    if not secrets_obj:
+        return {}
+
+    raw: Any = None
+    try:
+        raw = secrets_obj["leagues"]  # type: ignore[index]
+    except Exception:
+        try:
+            getter = getattr(secrets_obj, "get", None)
+        except Exception:
+            getter = None
+        if callable(getter):
+            try:
+                raw = getter("leagues")
+            except Exception:
+                raw = None
+    if raw is None:
+        return {}
+    return _normalize_league_mapping(raw)
+
+
+def _load_leagues_from_env_var() -> Dict[str, str]:
+    try:
+        raw_json = os.environ.get(LEAGUES_ENV_VAR)
+    except Exception:
+        raw_json = None
+    if not raw_json:
+        return {}
+    try:
+        data = json.loads(raw_json)
+    except Exception:
+        return {}
+    return _normalize_league_mapping(data)
+
+
+def _load_leagues_from_file() -> Dict[str, str]:
+    candidates = []
+    try:
+        env_path = os.environ.get(LEAGUES_FILE_ENV_VAR)
+    except Exception:
+        env_path = None
+    if env_path:
+        try:
+            candidate = Path(env_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
+            candidates.append(candidate)
+        except Exception:
+            pass
+    default_path = Path(__file__).with_name(DEFAULT_LEAGUES_FILENAME)
+    if default_path.exists():
+        candidates.append(default_path)
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            with candidate.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+        normalized = _normalize_league_mapping(data)
+        if normalized:
+            return normalized
+    return {}
+
+
+def _load_leagues_from_sources() -> Dict[str, str]:
+    loaders = (_load_leagues_from_secrets, _load_leagues_from_env_var, _load_leagues_from_file)
+    for loader in loaders:
+        try:
+            leagues = loader()
+        except Exception:
+            leagues = {}
+        if leagues:
+            return leagues
+    return {}
+
+
+LEAGUES = _load_leagues_from_sources()
 CACHE_TTL_SECONDS = 43200
 NFL_STATE_TTL_SECONDS = 3600
 CACHE_ENV_VAR = "SL_CACHE_DB_PATH"
@@ -1113,16 +1233,18 @@ def main():
     st.markdown(f"*Last updated: {now_et.strftime('%B %d, %Y at %I:%M %p %Z')}*")
     
     # Instructions for setup
-    if any(league_id.startswith("YOUR_") for league_id in LEAGUES.values()):
-        st.error("🔧 **Setup Required:** Please update your league IDs in the app.py file")
-        st.markdown("""
-        **To set up your dashboard:**
-        1. Open `app.py` in a text editor
-        2. Replace each `YOUR_LEAGUE_ID_HERE` with your actual Sleeper league ID
-        3. You can find your league ID in the URL when viewing your league on Sleeper
-        4. Save the file and refresh this page
-        """)
-        st.divider()
+    if not LEAGUES:
+        st.error("Setup required: no leagues have been configured yet.")
+        st.markdown(textwrap.dedent(
+            """
+            **To configure your leagues:**
+            1. Add a `leagues` section to `.streamlit/secrets.toml` with your league names mapped to Sleeper IDs
+            2. Or set the `SL_LEAGUES` environment variable to a JSON dictionary (example: `{\"League I\": \"123456789012345678\"}`)
+            3. Or create a `leagues.json` file next to `app.py` and optionally point to it via `SL_LEAGUES_FILE`
+            """
+        ).strip())
+        st.info("Streamlit secrets are the recommended option for deployments.")
+        return
 
     # Collect rosters/users (cached) for all leagues once (needed by weekly and season highlights)
     league_rosters = {}
